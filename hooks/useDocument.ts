@@ -6,7 +6,7 @@ import { Document, UpdateDocumentInput } from "@/types";
 export function useDocument(documentId: string) {
   const queryClient = useQueryClient();
 
-  const { data: document, isLoading, error } = useQuery({
+  const { data: document, isLoading, error, refetch } = useQuery({
     queryKey: ["document", documentId],
     queryFn: async () => {
       const res = await fetch(`/api/documents/${documentId}`);
@@ -53,5 +53,6 @@ export function useDocument(documentId: string) {
     deleteDocument: deleteMutation.mutate,
     isUpdating: updateMutation.isPending,
     isDeleting: deleteMutation.isPending,
+    refetch,
   };
 }

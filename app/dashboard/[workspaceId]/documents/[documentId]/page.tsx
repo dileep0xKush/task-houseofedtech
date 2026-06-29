@@ -8,10 +8,17 @@ import dynamic from "next/dynamic";
 import { AIAssistant } from "@/components/AI/AIAssistant";
 import { VersionTimeline } from "@/components/VersionHistory/VersionTimeline";
 import { ShareDialog } from "@/components/Layout/ShareDialog";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/Button";
-import { Clock } from "lucide-react";
+import { Clock, Wifi, WifiOff } from "lucide-react";
 import { Input } from "@/components/ui/Input";
+import {
+  initSocket,
+  joinDocument,
+  emitDocumentChange,
+  onRemoteChange,
+  getSocket,
+} from "@/features/socket/client";
 
 const CKEditorWrapper = dynamic(() => import("@/components/Editor/CKEditorWrapper").then(mod => ({ default: mod.CKEditorWrapper })), {
   ssr: false,
@@ -23,11 +30,54 @@ export default function DocumentPage() {
   const { data: session } = useSession();
   const documentId = params.documentId as string;
   const workspaceId = params.workspaceId as string;
-  const { document, isLoading, updateDocument } = useDocument(documentId);
+  const { document, isLoading, updateDocument, refetch } = useDocument(documentId);
   const selectedText = useEditorStore((state) => state.selectedText);
   const [showHistory, setShowHistory] = useState(false);
   const [title, setTitle] = useState("");
   const [isOwner, setIsOwner] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
+
+  // Initialize Socket.IO connection
+  useEffect(() => {
+    if (!session?.user?.email) return;
+
+    const socket = initSocket(session.user.email);
+
+    socket.on("connect", () => {
+      setIsConnected(true);
+      joinDocument(documentId);
+    });
+
+    socket.on("disconnect", () => {
+      setIsConnected(false);
+    });
+
+    return () => {
+      // Don't disconnect on unmount to maintain real-time connection
+    };
+  }, [session?.user?.email, documentId]);
+
+  // Listen for remote document changes
+  useEffect(() => {
+    const handleRemoteChange = (data: any) => {
+      const { userId } = data;
+
+      // Don't apply changes from own client
+      if (userId === session?.user?.email) return;
+
+      // Refetch document to get latest changes
+      refetch?.();
+    };
+
+    onRemoteChange(handleRemoteChange);
+
+    return () => {
+      const socket = getSocket();
+      if (socket) {
+        socket.off("remote-change", handleRemoteChange);
+      }
+    };
+  }, [session?.user?.email, refetch]);
 
   // Sync title when document loads
   useEffect(() => {
@@ -47,6 +97,18 @@ export default function DocumentPage() {
       setIsOwner(!isSharedMember);
     }
   }, [document?.members, session?.user?.email]);
+
+  // Emit document changes via Socket.IO
+  const handleDocumentChange = useCallback(
+    (content: any) => {
+      const socket = getSocket();
+      if (socket && isConnected) {
+        emitDocumentChange(documentId, { type: "insert", content }, document?.version || 1);
+      }
+      updateDocument({ content });
+    },
+    [documentId, isConnected, document?.version, updateDocument]
+  );
 
   if (isLoading) {
     return (
@@ -74,12 +136,29 @@ export default function DocumentPage() {
             onBlur={() => {
               if (title !== document.title) {
                 updateDocument({ title });
+                const socket = getSocket();
+                if (socket) {
+                  emitDocumentChange(documentId, { type: "title", value: title }, document?.version || 1);
+                }
               }
             }}
             className="text-3xl font-bold h-auto p-0 border-0 bg-transparent"
             placeholder="Untitled"
           />
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
+            <div className="flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-muted">
+              {isConnected ? (
+                <>
+                  <Wifi className="h-3 w-3 text-green-500" />
+                  <span className="text-green-600">Connected</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="h-3 w-3 text-red-500" />
+                  <span className="text-red-600">Offline</span>
+                </>
+              )}
+            </div>
             {isOwner && (
               <>
                 <ShareDialog
@@ -110,6 +189,10 @@ export default function DocumentPage() {
                 content: snapshot.content,
                 title: snapshot.title,
               });
+              const socket = getSocket();
+              if (socket) {
+                emitDocumentChange(documentId, { type: "restore", content: snapshot.content }, snapshot.version);
+              }
               setShowHistory(false);
             }}
           />
@@ -117,7 +200,7 @@ export default function DocumentPage() {
           <CKEditorWrapper
             initialContent={typeof document.content === "string" ? document.content : JSON.stringify(document.content || "")}
             onSave={(content) => {
-              updateDocument({ content } as any);
+              handleDocumentChange(content);
             }}
           />
         )}
